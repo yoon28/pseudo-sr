@@ -1,0 +1,65 @@
+EXP:
+  NAME: faces
+  SEED: 2020
+
+SR:
+  SCALE: 2
+  PATCH_SIZE_LR: 32
+  BATCH_PER_GPU: 50
+  MODEL: UPSCALER # ESRGAN or UPSCALER
+
+OPT:
+  START_EPOCH: 1
+  EPOCH: 21
+
+OPT_CYC:
+  LR_D: 0.0001
+  LR_G: 0.0001
+  TYPE: ADAM
+  MOMENTUM: 0.9
+  BETAS_D: [0.5, 0.999]
+  BETAS_G: [0.5, 0.999]
+  LR_MILESTONE: [3, 5, 9, 15]
+  LR_DECAY: 0.5
+  LOSS:
+    CYC_WEIGHT: 1
+    IDT_WEIGHT: 2
+    GEO_WEIGHT: 1
+    D_SR_WEIGHT: 0.1
+  IDT_INPUT: clean # corrupted or clean
+
+OPT_SR:
+  LR_D: 0.0001
+  LR_G: 0.0001
+  TYPE: ADAM
+  MOMENTUM: 0.9
+  BETAS_D: [0.9, 0.999]
+  BETAS_G: [0.9, 0.999]
+  LR_MILESTONE: [3, 5, 9, 15]
+  LR_DECAY: 0.9
+  LOSS:
+    PIXEL_WEIGHT: 0.3
+    VGG_WEIGHT: 0.2
+    GAN_WEIGHT: 0.5
+    R1_WEIGHT: 10.0
+  VGG_LOSS:
+    STY_WEIGHT: 0.0
+    PER_WEIGHT: 1.0
+
+PRETRAINED:
+  LR_D: False
+  LR_G: False
+  HR_D: False
+  HR_G: False
+  STRICT: False
+
+RESUME:
+  LR_GAN: False
+  HR_GAN: False
+
+DATA:
+  FOLDER: /mnt/workspace/Face-and-Image-super-resolution/Dataset
+  NUM_WORKERS: 4
+  IMG_RANGE: 255
+  IMG_MEAN_SHIFT: True
+  RGB: True

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import numpy as np
 
 def geometry_ensemble(net, img, flip_dir="H"):
     assert len(img.shape) == 4
@@ -31,7 +30,8 @@ def geometry_ensemble(net, img, flip_dir="H"):
 
 
 if __name__ == "__main__":
-    x = torch.arange(8, dtype=torch.float).view(1, 2, 2, 2)
+    x = torch.arange(9, dtype=torch.float32).view(1, 1, 3, 3)
+    x = torch.cat((x, x, x, x), dim=0)
     print(x)
     net = nn.Identity()
     out = geometry_ensemble(net, x, flip_dir="H")

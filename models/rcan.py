@@ -3,7 +3,7 @@ This file is copied from
 https://github.com/yulunzhang/RCAN
 '''
 
-import common
+from models import common
 
 import torch.nn as nn
 import torch
@@ -73,36 +73,37 @@ class RCAN(nn.Module):
     def __init__(self, args, conv=common.default_conv):
         super(RCAN, self).__init__()
         
-        n_resgroups = args.n_resgroups
-        n_resblocks = args.n_resblocks
-        n_feats = args.n_feats
+        n_resgroups = args["n_resgroups"]
+        n_resblocks = args["n_resblocks"]
+        n_feats = args["n_feats"]
         kernel_size = 3
-        reduction = args.reduction 
-        scale = args.scale
+        reduction = args["reduction"]
+        scale = args["scale"]
         act = nn.ReLU(True)
         
         # RGB mean for DIV2K 1-800
         #rgb_mean = (0.4488, 0.4371, 0.4040)
         # RGB mean for DIVFlickr2K 1-3450
         # rgb_mean = (0.4690, 0.4490, 0.4036)
-        if args.data_train == 'DIV2K':
+        if args["data_train"] == 'DIV2K':
             print('Use DIV2K mean (0.4488, 0.4371, 0.4040)')
             rgb_mean = (0.4488, 0.4371, 0.4040)
-        elif args.data_train == 'DIVFlickr2K':
+        elif args["data_train"] == 'DIVFlickr2K':
             print('Use DIVFlickr2K mean (0.4690, 0.4490, 0.4036)')
             rgb_mean = (0.4690, 0.4490, 0.4036)
         else:
-            rgb_mean = (0.0, 0.0, 0.0)
+            # print(f'rgb mean ({args["rgb_mean"][0]}, {args["rgb_mean"][1]}, {args["rgb_mean"][2]})')
+            rgb_mean = args["rgb_mean"]
         rgb_std = (1.0, 1.0, 1.0)
-        self.sub_mean = common.MeanShift(args.rgb_range, rgb_mean, rgb_std)
+        self.sub_mean = common.MeanShift(args["rgb_range"], rgb_mean, rgb_std)
         
         # define head module
-        modules_head = [conv(args.n_colors, n_feats, kernel_size)]
+        modules_head = [conv(args["n_colors"], n_feats, kernel_size)]
 
         # define body module
         modules_body = [
             ResidualGroup(
-                conv, n_feats, kernel_size, reduction, act=act, res_scale=args.res_scale, n_resblocks=n_resblocks) \
+                conv, n_feats, kernel_size, reduction, act=act, res_scale=args["res_scale"], n_resblocks=n_resblocks) \
             for _ in range(n_resgroups)]
 
         modules_body.append(conv(n_feats, n_feats, kernel_size))
@@ -110,25 +111,25 @@ class RCAN(nn.Module):
         # define tail module
         modules_tail = [
             common.Upsampler(conv, scale, n_feats, act=False),
-            conv(n_feats, args.n_colors, kernel_size)]
+            conv(n_feats, args["n_colors"], kernel_size)]
 
-        self.add_mean = common.MeanShift(args.rgb_range, rgb_mean, rgb_std, 1)
+        self.add_mean = common.MeanShift(args["rgb_range"], rgb_mean, rgb_std, 1)
 
         self.head = nn.Sequential(*modules_head)
         self.body = nn.Sequential(*modules_body)
         self.tail = nn.Sequential(*modules_tail)
 
     def forward(self, x):
-        # x = self.sub_mean(x)
+        x = self.sub_mean(x)
         x = self.head(x)
 
         res = self.body(x)
         res += x
 
         x = self.tail(res)
-        # x = self.add_mean(x)
+        x = self.add_mean(x)
 
-        return x 
+        return x
 
     def load_state_dict(self, state_dict, strict=False):
         own_state = self.state_dict()
@@ -156,38 +157,25 @@ class RCAN(nn.Module):
             if len(missing) > 0:
                 raise KeyError('missing keys in state_dict: "{}"'.format(missing))
 
-def make_G_cleaning():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--n_resgroups', type=int, default=5, help='number of residual groups')
-    parser.add_argument('--n_resblocks', type=int, default=10, help='number of residual blocks')
-    parser.add_argument('--n_feats', type=int, default=64, help='number of feature maps')
-    parser.add_argument('--reduction', type=int, default=16, help='number of feature maps reduction')
-    parser.add_argument('--scale', type=int, default=1, help='super resolution scale')
-    parser.add_argument('--data_train', type=str, default='NONE', help='train dataset name')
-    parser.add_argument('--rgb_range', type=float, default=1, help='maximum value of RGB')
-    parser.add_argument('--n_colors', type=int, default=3, help='number of color channels to use')
-    parser.add_argument('--res_scale', type=float, default=1, help='residual scaling')
-    args = parser.parse_args()
-    return RCAN(args)
+def make_cleaning_net(rgb_range=255, rgb_mean=(0.5, 0.5, 0.5)):
+    opt = {"n_resgroups":5, "n_resblocks":10, "n_feats":64, "reduction":16, "scale":1,
+            "data_train":"NONE", "rgb_range":rgb_range, "rgb_mean":rgb_mean, "n_colors":3,
+            "res_scale":1.0}
+    return RCAN(opt)
 
-def make_G_SR():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--n_resgroups', type=int, default=5, help='number of residual groups')
-    parser.add_argument('--n_resblocks', type=int, default=20, help='number of residual blocks')
-    parser.add_argument('--n_feats', type=int, default=64, help='number of feature maps')
-    parser.add_argument('--reduction', type=int, default=16, help='number of feature maps reduction')
-    parser.add_argument('--scale', type=int, default=2, help='super resolution scale')
-    parser.add_argument('--data_train', type=str, default='NONE', help='train dataset name')
-    parser.add_argument('--rgb_range', type=float, default=1, help='maximum value of RGB')
-    parser.add_argument('--n_colors', type=int, default=3, help='number of color channels to use')
-    parser.add_argument('--res_scale', type=float, default=1, help='residual scaling')
-    args = parser.parse_args()
-    return RCAN(args)
+def make_SR_net(rgb_range=255, rgb_mean=(0.5, 0.5, 0.5), scale_factor=4):
+    opt = {"n_resgroups":5, "n_resblocks":20, "n_feats":64, "reduction":16, "scale":scale_factor,
+            "data_train":"NONE", "rgb_range":rgb_range, "rgb_mean":rgb_mean, "n_colors":3,
+            "res_scale":1.0}
+    return RCAN(opt)
 
 if __name__ == "__main__":
-    model = make_G_SR()
+    rgb_range = 1
+    rgb_mean = (0.0, 0.0, 0.0)
+    model = make_cleaning_net(rgb_range=rgb_range, rgb_mean=rgb_mean)
     print(model)
 
-    X = torch.randn([2, 3, 250, 192], dtype=torch.float32)
-    Y = model(X)
+    X = torch.rand([2, 3, 250, 192], dtype=torch.float32) * rgb_range
+    Y = model(X).detach()
     print(X.shape, Y.shape)
+    print(X.min(), X.max(), Y.min(), Y.max())
