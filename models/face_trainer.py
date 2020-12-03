@@ -1,87 +1,68 @@
 import torch
-from torch import autograd
-from torch._C import device
 import torch.nn as nn
-import torch.nn.init as init
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import os
-import cv2
-import numpy as np
-
-from models.rcan import make_cleaning_net, make_SR_net
-from models.generators import TransferNet
+from models.vggs import VGGFeatureExtractor
+from models.rrdb import RRDBNet
 from models.discriminators import NLayerDiscriminator
 from models.losses import GANLoss
 from models.geo_loss import geometry_ensemble
+from models.pseudo_model import Pseudo_Model
 
-class Face_Model():
+class Face_Model(Pseudo_Model):
     def __init__(self, device, cfg, use_ddp=False):
-        self.device = device
-        self.idt_input_clean = cfg.OPT_CYC.IDT_INPUT == "clean"
-        rgb_range = cfg.DATA.IMG_RANGE
-        rgb_mean_point = (0.5, 0.5, 0.5) if cfg.DATA.IMG_MEAN_SHIFT else (0, 0, 0)
-        self.G_xy = make_cleaning_net(rgb_range=rgb_range, rgb_mean=rgb_mean_point).to(device)
-        self.G_yx = TransferNet(rgb_range=rgb_range, rgb_mean=rgb_mean_point).to(device)
-        self.U = make_SR_net(rgb_range=rgb_range, rgb_mean=rgb_mean_point, scale_factor=2).to(device)
-        self.D_x = NLayerDiscriminator(3, scale_factor=1, norm_layer=nn.Identity).to(device)
-        self.D_y = NLayerDiscriminator(3, scale_factor=1, norm_layer=nn.Identity).to(device)
-        self.D_sr = NLayerDiscriminator(3, scale_factor=cfg.SR.SCALE, norm_layer=nn.Identity).to(device)
-        if use_ddp:
-            self.G_xy = DDP(self.G_xy, device_ids=[device])
-            self.G_yx = DDP(self.G_yx, device_ids=[device])
-            self.U = DDP(self.U, device_ids=[device])
-            self.D_x = DDP(self.D_x, device_ids=[device])
-            self.D_y = DDP(self.D_y, device_ids=[device])
-            self.D_sr = DDP(self.D_sr, device_ids=[device])
+        super(Face_Model, self).__init__(device=device, cfg=cfg, use_ddp=use_ddp)
+        self.use_esrgan = cfg.SR.MODEL == "ESRGAN"
+        self.sr_warmup_iter = cfg.OPT_SR.WARMUP
+        if self.use_esrgan:
+            del self.U
+            del self.opt_U
+            del self.lr_U
+            del self.nets["U"]
+            del self.optims["U"]
+            del self.lr_decays["U"]
+            self.U = RRDBNet(3, 3, scale_factor=cfg.SR.SCALE).to(device)
+            self.D_esrgan = NLayerDiscriminator(3, scale_factor=1, norm_layer=nn.InstanceNorm2d).to(device)
+            if use_ddp:
+                self.U = DDP(self.U, device_ids=[device])
+                self.D_esrgan = DDP(self.D_esrgan, device_ids=[device])
+            self.opt_U = optim.Adam(self.U.parameters(), lr=cfg.OPT_SR.LR_G, betas=cfg.OPT_SR.BETAS_G)
+            self.opt_D_esrgan = optim.Adam(self.D_esrgan.parameters(), lr=cfg.OPT_SR.LR_D, betas=cfg.OPT_SR.BETAS_D)
+            self.lr_U = optim.lr_scheduler.MultiStepLR(self.opt_U, milestones=cfg.OPT_SR.LR_MILESTONE, gamma=cfg.OPT_SR.LR_DECAY)
+            self.lr_D_esrgan = optim.lr_scheduler.MultiStepLR(self.opt_D_esrgan, milestones=cfg.OPT_SR.LR_MILESTONE, gamma=cfg.OPT_SR.LR_DECAY)
+            self.nets["U"] = self.U
+            self.nets["D_esrgan"] = self.D_esrgan
+            self.optims["U"] = self.opt_U
+            self.optims["D_esrgan"] = self.opt_D_esrgan
+            self.lr_decays["U"] = self.lr_U
+            self.lr_decays["D_esrgan"] = self.lr_D_esrgan
+            self.discs.append("D_esrgan")
 
-        self.opt_Gxy = optim.Adam(self.G_xy.parameters(), lr=cfg.OPT_CYC.LR_G, betas=cfg.OPT_CYC.BETAS_G)
-        self.opt_Gyx = optim.Adam(self.G_yx.parameters(), lr=cfg.OPT_CYC.LR_G, betas=cfg.OPT_CYC.BETAS_G)
-        self.opt_Dx = optim.Adam(self.D_x.parameters(), lr=cfg.OPT_CYC.LR_D, betas=cfg.OPT_CYC.BETAS_D)
-        self.opt_Dy = optim.Adam(self.D_y.parameters(), lr=cfg.OPT_CYC.LR_D, betas=cfg.OPT_CYC.BETAS_D)
-        self.opt_U = optim.Adam(self.U.parameters(), lr=cfg.OPT_SR.LR_G, betas=cfg.OPT_SR.BETAS_G)
-        self.opt_Dsr = optim.Adam(self.D_sr.parameters(), lr=cfg.OPT_SR.LR_D, betas=cfg.OPT_SR.BETAS_D)
+            self.ragan_loss = GANLoss("vanilla")
+            self.vgg_feat = "conv5_4"
+            self.vgg = VGGFeatureExtractor([self.vgg_feat], use_input_norm=True, range_norm=False).to(device)
 
-        self.lr_Gxy = optim.lr_scheduler.MultiStepLR(self.opt_Gxy, milestones=cfg.OPT_CYC.LR_MILESTONE, gamma=cfg.OPT_CYC.LR_DECAY)
-        self.lr_Gyx = optim.lr_scheduler.MultiStepLR(self.opt_Gyx, milestones=cfg.OPT_CYC.LR_MILESTONE, gamma=cfg.OPT_CYC.LR_DECAY)
-        self.lr_Dx = optim.lr_scheduler.MultiStepLR(self.opt_Dx, milestones=cfg.OPT_CYC.LR_MILESTONE, gamma=cfg.OPT_CYC.LR_DECAY)
-        self.lr_Dy = optim.lr_scheduler.MultiStepLR(self.opt_Dy, milestones=cfg.OPT_CYC.LR_MILESTONE, gamma=cfg.OPT_CYC.LR_DECAY)
-        self.lr_U = optim.lr_scheduler.MultiStepLR(self.opt_U, milestones=cfg.OPT_SR.LR_MILESTONE, gamma=cfg.OPT_SR.LR_DECAY)
-        self.lr_Dsr = optim.lr_scheduler.MultiStepLR(self.opt_Dsr, milestones=cfg.OPT_SR.LR_MILESTONE, gamma=cfg.OPT_SR.LR_DECAY)
+            self.sr_pix_weight = cfg.OPT_SR.LOSS.PIXEL_WEIGHT
+            self.sr_vgg_weight = cfg.OPT_SR.LOSS.VGG_WEIGHT
+            self.sr_gan_weight = cfg.OPT_SR.LOSS.GAN_WEIGHT
 
-        self.nets = {"G_xy":self.G_xy, "G_yx":self.G_yx, "U":self.U, "D_x":self.D_x, "D_y":self.D_y, "D_sr":self.D_sr}
-        self.optims = {"G_xy":self.opt_Gxy, "G_yx":self.opt_Gyx, "U":self.opt_U, "D_x":self.opt_Dx, "D_y":self.opt_Dy, "D_sr":self.opt_Dsr}
-        self.lr_decays = {"G_xy":self.lr_Gxy, "G_yx":self.lr_Gyx, "U":self.lr_U, "D_x":self.lr_Dx, "D_y":self.lr_Dy, "D_sr":self.lr_Dsr}
-        self.discs = ["D_x", "D_y", "D_sr"]
-        self.gens = ["G_xy", "G_yx", "U"]
-
-        self.n_iter = 0
-        self.gan_loss = GANLoss("lsgan")
-        self.l1_loss = nn.L1Loss()
-
-        self.d_sr_weight = cfg.OPT_CYC.LOSS.D_SR_WEIGHT
-        self.cyc_weight = cfg.OPT_CYC.LOSS.CYC_WEIGHT
-        self.idt_weight = cfg.OPT_CYC.LOSS.IDT_WEIGHT
-        self.geo_weight = cfg.OPT_CYC.LOSS.GEO_WEIGHT
-
-    def net_grad_toggle(self, nets, need_grad):
-        for n in nets:
-            for p in self.nets[n].parameters():
-                p.requires_grad = need_grad
-
-    def mode_selector(self, mode="train"):
-        if mode == "train":
-            for n in self.nets:
-                self.nets[n].train()
-        elif mode in ["eval", "test"]:
-            for n in self.nets:
-                self.nets[n].eval()
+    def warmup_checker(self):
+        return self.n_iter <= self.sr_warmup_iter
 
     def lr_decay_step(self, shout=False):
-        for n in self.lr_decays:
+        lrs = "\nLearning rates: "
+        changed = False
+        for i, n in enumerate(self.lr_decays):
+            if self.warmup_checker() and n == "D_esrgan":
+                continue
+            lr_old = self.lr_decays[n].get_last_lr()[0]
             self.lr_decays[n].step()
+            lr_new = self.lr_decays[n].get_last_lr()[0]
+            if lr_old != lr_new:
+                changed = True
+                lrs += f", {n}={self.lr_decays[n].get_last_lr()[0]}" if i > 0 else f"{n}={self.lr_decays[n].get_last_lr()[0]}"
+        if shout and changed: print(lrs)
 
     def train_step(self, Ys, Xs, Yds, Zs):
         '''
@@ -145,13 +126,13 @@ class Face_Model():
         loss_idt_Gxy = self.l1_loss(idt_out, Yds) if self.idt_input_clean else self.l1_loss(idt_out, Xs)
         loss_cycle = self.l1_loss(rec_Yds, Yds)
         loss_geo = self.l1_loss(fake_Yds, geo_Yds)
-        loss_sr_d = self.gan_loss(pred_sr_y, True, False)
-        loss_total_gen = loss_gan_Gyx + loss_gan_Gxy + self.cyc_weight * loss_cycle + self.idt_weight * loss_idt_Gxy + self.geo_weight * loss_geo + self.d_sr_weight * loss_sr_d
+        loss_d_sr = self.gan_loss(pred_sr_y, True, False)
+        loss_total_gen = loss_gan_Gyx + loss_gan_Gxy + self.cyc_weight * loss_cycle + self.idt_weight * loss_idt_Gxy + self.geo_weight * loss_geo + self.d_sr_weight * loss_d_sr
         loss_dict["G_xy_gan"] = loss_gan_Gxy.item()
         loss_dict["G_xy_idt"] = loss_idt_Gxy.item()
         loss_dict["cyc_loss"] = loss_cycle.item()
         loss_dict["G_xy_geo"] = loss_geo.item()
-        loss_dict["sr_d_loss"] = loss_sr_d.item()
+        loss_dict["D_sr"] = loss_d_sr.item()
         loss_dict["G_total"] = loss_total_gen.item()
 
         # gen loss backward and update
@@ -159,12 +140,68 @@ class Face_Model():
         self.opt_Gyx.step()
         self.opt_Gxy.step()
 
-        self.opt_U.zero_grad()
-        loss_U = self.l1_loss(self.U(rec_Yds.detach()), Ys)
-        loss_U.backward()
-        self.opt_U.step()
-        loss_dict["U_loss"] = loss_U.item()
+        # U
+        if self.use_esrgan and not self.warmup_checker():
+            fake_sr = self.U(rec_Yds.detach())
+
+            # D
+            self.net_grad_toggle(["D_esrgan"], True)
+            self.opt_D_esrgan.zero_grad()
+            fake_pred = self.D_esrgan(fake_sr).detach()
+            real_pred = self.D_esrgan(Ys)
+            real_loss = self.ragan_loss(real_pred - torch.mean(fake_pred), True, is_disc=True) * 0.5
+            real_loss.backward()
+
+            fake_pred = self.D_esrgan(fake_sr.detach())
+            fake_loss = self.ragan_loss(fake_pred - torch.mean(real_pred.detach()), False, is_disc=True) * 0.5
+            fake_loss.backward()
+            self.opt_D_esrgan.step()
+            loss_dict["D_esrgan"] = real_loss.item() + fake_loss.item()
+
+            # G
+            self.net_grad_toggle(["D_esrgan"], False)
+            self.opt_U.zero_grad()
+            loss_pix = self.l1_loss(fake_sr, Ys)
+            loss_vgg = self.l1_loss(self.vgg(fake_sr)[self.vgg_feat], self.vgg(Ys)[self.vgg_feat].detach())
+
+            real_pred = self.D_esrgan(Ys).detach()
+            fake_pred = self.D_esrgan(fake_sr)
+            real_loss = self.ragan_loss(real_pred - torch.mean(fake_pred), False, is_disc=False)
+            fake_loss = self.ragan_loss(fake_pred - torch.mean(real_pred), True, is_disc=False)
+            loss_gan = (real_loss + fake_loss) * 0.5
+            loss_U = self.sr_pix_weight * loss_pix + self.sr_vgg_weight * loss_vgg + self.sr_gan_weight * loss_gan
+            loss_U.backward()
+            self.opt_U.step()
+            loss_dict["U_pix"] = loss_pix.item()
+            loss_dict["U_vgg"] = loss_vgg.item()
+            loss_dict["U_gan"] = loss_gan.item()
+            loss_dict["U_total"] = loss_U.item()
+        else:
+            self.opt_U.zero_grad()
+            loss_U = self.l1_loss(self.U(rec_Yds.detach()), Ys)
+            loss_U.backward()
+            self.opt_U.step()
+            loss_dict["U_pix"] = loss_U.item()
         return loss_dict
 
 if __name__ == "__main__":
-    print("fin.")
+    from yacs.config import CfgNode
+    with open("configs/faces.yaml", "rb") as cf:
+        CFG = CfgNode.load_cfg(cf)
+        CFG.freeze()
+    device = 0
+    x = torch.randn(8, 3, 32, 32, dtype=torch.float32, device=device)
+    y = torch.randn(8, 3, 64, 64, dtype=torch.float32, device=device)
+    yd = torch.randn(8, 3, 32, 32, dtype=torch.float32, device=device)
+    z = torch.randn(8, 1, 8, 8, dtype=torch.float32, device=device)
+    model = Face_Model(device, CFG)
+    losses = model.train_step(y, x, yd, z)
+    file_name = model.net_save(".", True)
+    model.net_load(file_name)
+    for i in range(110000):
+        model.lr_decay_step(True)
+    info = f"  1/(1):"
+    for i, itm in enumerate(losses.items()):
+        info += f", {itm[0]}={itm[1]:.3f}" if i > 0 else f" {itm[0]}={itm[1]:.3f}"
+    print(info)
+    print("fin")

@@ -1,16 +1,16 @@
 EXP:
   NAME: faces
   SEED: 2020
+  OUT_DIR: results/faces
 
 SR:
   SCALE: 2
   PATCH_SIZE_LR: 32
-  BATCH_PER_GPU: 50
-  MODEL: UPSCALER # ESRGAN or UPSCALER
+  BATCH_PER_GPU: 16
+  MODEL: ESRGAN # ESRGAN or UPSCALER
 
 OPT:
-  START_EPOCH: 1
-  EPOCH: 21
+  MAX_ITER: 300000
 
 OPT_CYC:
   LR_D: 0.0001
@@ -19,7 +19,7 @@ OPT_CYC:
   MOMENTUM: 0.9
   BETAS_D: [0.5, 0.999]
   BETAS_G: [0.5, 0.999]
-  LR_MILESTONE: [3, 5, 9, 15]
+  LR_MILESTONE: [100000, 180000, 240000, 280000]
   LR_DECAY: 0.5
   LOSS:
     CYC_WEIGHT: 1
@@ -29,22 +29,19 @@ OPT_CYC:
   IDT_INPUT: clean # corrupted or clean
 
 OPT_SR:
+  WARMUP: 5000
   LR_D: 0.0001
   LR_G: 0.0001
   TYPE: ADAM
   MOMENTUM: 0.9
   BETAS_D: [0.9, 0.999]
   BETAS_G: [0.9, 0.999]
-  LR_MILESTONE: [3, 5, 9, 15]
+  LR_MILESTONE: [100000, 180000, 240000, 280000]
   LR_DECAY: 0.9
   LOSS:
-    PIXEL_WEIGHT: 0.3
-    VGG_WEIGHT: 0.2
-    GAN_WEIGHT: 0.5
-    R1_WEIGHT: 10.0
-  VGG_LOSS:
-    STY_WEIGHT: 0.0
-    PER_WEIGHT: 1.0
+    PIXEL_WEIGHT: 0.01
+    VGG_WEIGHT: 1
+    GAN_WEIGHT: 0.005
 
 PRETRAINED:
   LR_D: False
@@ -59,7 +56,7 @@ RESUME:
 
 DATA:
   FOLDER: /mnt/workspace/Face-and-Image-super-resolution/Dataset
-  NUM_WORKERS: 4
-  IMG_RANGE: 255
-  IMG_MEAN_SHIFT: True
+  NUM_WORKERS: 8
+  IMG_RANGE: 1 # for ESRGAN, set it to 1
+  IMG_MEAN_SHIFT: False # for ESRGAN, set it to False
   RGB: True
